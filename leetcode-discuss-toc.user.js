@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         力扣讨论 · 文章目录
 // @namespace    local.leetcode-discuss-toc
-// @version      1.0.5
+// @version      1.0.6
 // @description  为力扣讨论文章生成可搜索、可折叠、自动高亮的多级目录，点击即可跳转。
 // @match        https://leetcode.cn/*
 // @run-at       document-idle
@@ -235,27 +235,43 @@
   }
 
   function updateInsets() {
-    let bottom = 0;
-    for (const candidate of document.querySelectorAll('header,nav,[role="banner"]')) {
+    let visibleBottom = 0;
+    let fixedBottom = 0;
+    const topRegion = Math.max(80, window.innerHeight / 3);
+    const measured = new Set();
+    for (const candidate of document.querySelectorAll('#leetcode-navbar,#navbar-container,header,nav,[role="banner"]')) {
+      // Article navigation and comment pagination are not the site's top bar.
+      if (candidate.closest('main,article') || article?.contains(candidate)) continue;
       for (let node = candidate, depth = 0; node && depth < 6; node = node.parentElement, depth++) {
+        if (measured.has(node)) continue;
+        measured.add(node);
+        const style = getComputedStyle(node);
+        const fixed = style.position === 'fixed' || style.position === 'sticky';
+        if (node !== candidate && !fixed) continue;
         const rect = node.getBoundingClientRect();
-        const position = getComputedStyle(node).position;
-        if ((position === 'fixed' || position === 'sticky')
-          && rect.top <= 1 && rect.bottom > 0 && rect.bottom < window.innerHeight / 3
-          && rect.width > window.innerWidth / 3) {
-          bottom = Math.max(bottom, rect.bottom);
-          break;
-        }
+        if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0'
+          || rect.height <= 0 || rect.height > topRegion || rect.top >= topRegion
+          || rect.bottom <= 0 || rect.width <= window.innerWidth / 3) continue;
+        visibleBottom = Math.max(visibleBottom, rect.bottom);
+        // In-flow bars need panel clearance only: they scroll away when jumping
+        // to a heading, unlike fixed or sticky bars that obscure article content.
+        if (fixed) fixedBottom = Math.max(fixedBottom, rect.bottom);
       }
     }
-    topInset = Math.ceil(bottom) + 16;
-    if (host) host.style.setProperty('top', `${Math.max(24, topInset + 14)}px`, 'important');
+    topInset = Math.ceil(fixedBottom) + 16;
+    const panelTop = `${Math.max(24, Math.ceil(visibleBottom) + 30)}px`;
+    if (host) {
+      if (host.style.top !== panelTop) host.style.setProperty('top', panelTop, 'important');
+      if (host.style.getPropertyValue('--panel-top') !== panelTop) host.style.setProperty('--panel-top', panelTop);
+    }
     for (const { element: node } of entries) {
       if (!savedMargins.has(node)) savedMargins.set(node, {
         value: node.style.getPropertyValue('scroll-margin-top'),
         priority: node.style.getPropertyPriority('scroll-margin-top'),
       });
-      node.style.setProperty('scroll-margin-top', `${topInset}px`);
+      if (node.style.scrollMarginTop !== `${topInset}px`) {
+        node.style.setProperty('scroll-margin-top', `${topInset}px`);
+      }
     }
   }
 
@@ -479,6 +495,7 @@
     if (frame || !entries.length || destroyed) return;
     frame = requestAnimationFrame(() => {
       frame = 0;
+      updateInsets();
       let current = entries[0];
       // Read live positions, so images and math rendering cannot invalidate cached offsets.
       for (const entry of entries) {
@@ -604,7 +621,8 @@
     button:focus-visible,input:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
     svg { width:18px; height:18px; flex:none; }
     .panel { display:flex; flex-direction:column; width:min(288px,calc(100vw - 32px));
-      max-height:calc(100vh - 120px); max-height:calc(100dvh - 120px); background:var(--bg);
+      max-height:calc(100vh - var(--panel-top,80px) - 16px);
+      max-height:calc(100dvh - var(--panel-top,80px) - 16px); background:var(--bg);
       border:1px solid var(--line); border-radius:16px; box-shadow:0 12px 44px #17223516;
       overflow:hidden; }
     .header,.article-title,.tools { flex-shrink:0; }

@@ -9,10 +9,11 @@ const article = (content, extra = '') => `<main id="main-content"><h1>测试文�
   <div class="markdown-content_markdown__test Body_markdown__test">${content}</div>${extra}</main>`;
 
 function page(t, { body = article('<h2>第一章</h2><h3>基础</h3><h4>例题</h4><h2>第二章</h2>'),
-  width = 1440, reduced = false, url = 'https://leetcode.cn/discuss/post/1001/test/',
+  width = 1440, height = 768, reduced = false, url = 'https://leetcode.cn/discuss/post/1001/test/',
+  header = '<div class="test-header" style="position:fixed;top:0"><nav>力扣</nav></div>',
   storageBlocked = false, previousPanelOpen, controlledFrames = false } = {}) {
   const dom = new JSDOM(`<!doctype html><html class="light"><body>
-    <div class="test-header" style="position:fixed;top:0"><nav>力扣</nav></div>${body}</body></html>`, {
+    ${header}${body}</body></html>`, {
     url, runScripts: 'outside-only', pretendToBeVisual: true,
   });
   const { window: w } = dom;
@@ -38,6 +39,7 @@ function page(t, { body = article('<h2>第一章</h2><h3>基础</h3><h4>例题</
     }
   }
   Object.defineProperty(w, 'innerWidth', { value: width, configurable: true });
+  Object.defineProperty(w, 'innerHeight', { value: height, configurable: true });
   w.matchMedia = query => ({ matches: query.includes('reduced-motion') && reduced,
     media: query, addEventListener() {}, removeEventListener() {} });
   if (previousPanelOpen !== undefined) {
@@ -50,7 +52,14 @@ function page(t, { body = article('<h2>第一章</h2><h3>基础</h3><h4>例题</
   const jumps = [];
   const geometry = w.Element.prototype.getBoundingClientRect;
   w.Element.prototype.getBoundingClientRect = function () {
-    if (this.classList.contains('test-header') || this.tagName === 'NAV' && !this.closest('#main-content')) {
+    if (this.hasAttribute('data-test-height')) {
+      return w.DOMRect.fromRect({
+        x: Number(this.dataset.testLeft || 0),
+        y: Number(this.dataset.testTop || 0) - (this.dataset.testFlow === 'true' ? scrollY : 0),
+        width: Number(this.dataset.testWidth || width), height: Number(this.dataset.testHeight),
+      });
+    }
+    if (this.classList.contains('test-header') || this.tagName === 'NAV' && this.closest('.test-header')) {
       return w.DOMRect.fromRect({ x: 0, y: 0, width, height: 50 });
     }
     if (/^H[1-6]$/.test(this.tagName)) {
@@ -184,6 +193,137 @@ test('点击标题平滑定位，并留出固定导航的 50px 和额外 16px', 
   assert.equal(p.jumps[0].options.block, 'start');
   assert.equal(p.jumps[0].margin, '66px');
   assert.equal(p.w.location.hash, '');
+});
+
+for (const [name, header] of [
+  ['普通流语义导航', '<header data-test-height="64" data-test-flow="true"><nav>力扣</nav></header>'],
+  ['相对定位的站点导航容器', '<div id="navbar-container" style="position:relative" '
+    + 'data-test-height="64" data-test-flow="true">力扣</div>'],
+]) {
+  test(`${name}滚出再滚回时，目录实时避让顶部导航，跳转不多留普通流导航高度`, async t => {
+    const p = page(t, { header, controlledFrames: true });
+    const host = p.w.document.getElementById('lc-discuss-toc');
+    assert.equal(host.style.top, '94px');
+    assert.equal(host.style.getPropertyValue('--panel-top'), '94px');
+    assert.equal(p.w.document.querySelector('.Body_markdown__test h2').style.scrollMarginTop, '16px');
+    await p.scroll(32);
+    assert.equal(host.style.top, '62px', '部分露出的导航按其当前底边避让');
+    await p.scroll(128);
+    assert.equal(host.style.top, '30px', '导航完全滚出后释放顶部空间');
+    await p.scroll(0);
+    assert.equal(host.style.top, '94px', '仅靠滚动事件即可重新避让');
+    assert.equal(host.style.getPropertyValue('--panel-top'), '94px');
+    p.links()[1].click();
+    assert.equal(p.jumps[0].margin, '16px');
+  });
+}
+
+test('固定导航存在正顶部偏移时，面板避让和标题跳转均采用其真实底边', t => {
+  const p = page(t, { header: '<div id="leetcode-navbar" style="position:fixed;top:12px" '
+    + 'data-test-top="12" data-test-height="64"><nav>力扣</nav></div>', controlledFrames: true });
+  const host = p.w.document.getElementById('lc-discuss-toc');
+  assert.equal(host.style.top, '106px');
+  assert.equal(host.style.getPropertyValue('--panel-top'), '106px');
+  p.links()[1].click();
+  assert.equal(p.jumps[0].margin, '92px');
+  p.advance();
+  assert.equal(host.style.top, '106px');
+});
+
+test('普通流导航与偏移 sticky 栏并存时，面板避让可见栏，阅读留白只计算遮挡栏', t => {
+  const p = page(t, {
+    header: '<header data-test-height="100">普通流站点导航</header>'
+      + '<div style="position:sticky;top:12px" data-test-top="12" data-test-height="64">'
+      + '<nav>固定工具栏</nav></div>',
+    controlledFrames: true,
+  });
+  const host = p.w.document.getElementById('lc-discuss-toc');
+  assert.equal(host.style.top, '130px');
+  p.links()[1].click();
+  assert.equal(p.jumps[0].margin, '92px');
+});
+
+test('多个固定或 sticky 顶部栏取最下方底边，避免只识别第一层导航', t => {
+  const p = page(t, {
+    header: '<header style="position:fixed;top:0" data-test-height="32">主导航</header>'
+      + '<div id="navbar-container" style="position:sticky;top:32px" '
+      + 'data-test-top="32" data-test-height="48">讨论导航</div>',
+    controlledFrames: true,
+  });
+  assert.equal(p.w.document.getElementById('lc-discuss-toc').style.top, '110px');
+  p.links()[0].click();
+  assert.equal(p.jumps[0].margin, '96px');
+});
+
+test('不可见、离开视口、低位导航和高大侧栏不占据目录顶部空间', t => {
+  const p = page(t, {
+    header: '<header style="visibility:hidden" data-test-height="120">隐藏导航</header>'
+      + '<header hidden data-test-height="110">未显示导航</header>'
+      + '<nav data-test-top="-100" data-test-height="64">已移出视口</nav>'
+      + '<nav data-test-top="400" data-test-height="32">页面下方导航</nav>'
+      + '<nav data-test-height="640">高大侧栏</nav>'
+      + '<nav data-test-height="100" data-test-width="200">窄侧栏</nav>',
+    controlledFrames: true,
+  });
+  assert.equal(p.w.document.getElementById('lc-discuss-toc').style.top, '30px');
+  p.links()[0].click();
+  assert.equal(p.jumps[0].margin, '16px');
+});
+
+test('正文和 main 内部导航不被误识别为站点顶栏', t => {
+  const p = page(t, {
+    header: '',
+    body: article('<nav style="position:fixed;top:0" data-test-height="120">正文内导航</nav>'
+      + '<h2>章节</h2><h3>小节</h3>',
+    '<header style="position:fixed;top:0" data-test-height="100">文章信息栏</header>'),
+    controlledFrames: true,
+  });
+  assert.equal(p.w.document.getElementById('lc-discuss-toc').style.top, '30px');
+  p.links()[0].click();
+  assert.equal(p.jumps[0].margin, '16px');
+});
+
+test('顶栏几何变化更新目录避让时，手动浏览暂停状态不被解除', async t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true,
+    header: '<div id="leetcode-navbar" style="position:fixed;top:0" '
+      + 'data-test-height="50"><nav>力扣</nav></div>' });
+  const navigation = outlineViewport(p);
+  await p.scroll(7134);
+  navigation.scrollTop = 0;
+  p.shadow().querySelector('[aria-label="折叠 第1章"]').click();
+  const header = p.w.document.getElementById('leetcode-navbar');
+  header.style.top = '24px';
+  header.dataset.testTop = '24';
+  header.dataset.testHeight = '80';
+  p.w.dispatchEvent(new p.w.Event('resize'));
+  p.advance();
+  assert.equal(p.w.document.getElementById('lc-discuss-toc').style.top, '134px');
+  assert.equal(navigation.scrollTop, 0);
+  assert.equal(p.shadow().querySelector('[aria-current]').textContent, '§8.1 基础');
+  p.movePage(7135);
+  assertFollowed(p, '§8.1 基础');
+});
+
+test('面板最大高度使用当前顶部避让变量，并保留视口底部空间', async t => {
+  const p = page(t, { height: 600, controlledFrames: true,
+    header: '<header data-test-height="96" data-test-flow="true">站点导航</header>' });
+  const host = p.w.document.getElementById('lc-discuss-toc');
+  assert.equal(host.style.top, '126px');
+  assert.equal(host.style.getPropertyValue('--panel-top'), host.style.top);
+  // jsdom does not attach a sheet to styles inside a shadow root. Parse the
+  // mounted UI's styles with its CSSOM instead of asserting userscript source.
+  const mountedStyle = p.shadow().querySelector('style');
+  const parsedStyle = p.w.document.createElement('style');
+  parsedStyle.textContent = mountedStyle.textContent;
+  p.w.document.head.append(parsedStyle);
+  const panelRule = [...parsedStyle.sheet.cssRules].find(rule => rule.selectorText === '.panel');
+  assert.ok(panelRule);
+  assert.match(panelRule.style.getPropertyValue('max-height'),
+    /^calc\(100dvh\s*-\s*var\(--panel-top,\s*80px\)\s*-\s*16px\)$/);
+  await p.scroll(128);
+  assert.equal(host.style.top, '30px');
+  assert.equal(host.style.getPropertyValue('--panel-top'), host.style.top,
+    '导航滚出后的高度限制使用同一个实时顶部偏移');
 });
 
 test('减少动态效果偏好使用即时跳转', t => {
