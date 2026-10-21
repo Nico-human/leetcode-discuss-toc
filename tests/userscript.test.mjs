@@ -1,0 +1,869 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { JSDOM } from 'jsdom';
+
+const source = await readFile(new URL('../leetcode-discuss-toc.user.js', import.meta.url), 'utf8');
+const wait = (ms = 180) => new Promise(resolve => setTimeout(resolve, ms));
+const article = (content, extra = '') => `<main id="main-content"><h1>测试文章</h1>
+  <div class="markdown-content_markdown__test Body_markdown__test">${content}</div>${extra}</main>`;
+
+function page(t, { body = article('<h2>第一章</h2><h3>基础</h3><h4>例题</h4><h2>第二章</h2>'),
+  width = 1440, reduced = false, url = 'https://leetcode.cn/discuss/post/1001/test/',
+  storageBlocked = false, previousPanelOpen, controlledFrames = false } = {}) {
+  const dom = new JSDOM(`<!doctype html><html class="light"><body>
+    <div class="test-header" style="position:fixed;top:0"><nav>力扣</nav></div>${body}</body></html>`, {
+    url, runScripts: 'outside-only', pretendToBeVisual: true,
+  });
+  const { window: w } = dom;
+  t.after(() => { w.__leetcodeDiscussToc__?.destroy(); w.close(); });
+  let animationTime = 0;
+  let nextFrameId = 0;
+  const pendingFrames = new Map();
+  if (controlledFrames) {
+    w.requestAnimationFrame = callback => {
+      const id = ++nextFrameId;
+      pendingFrames.set(id, callback);
+      return id;
+    };
+    w.cancelAnimationFrame = id => pendingFrames.delete(id);
+  }
+  function advance(duration = 1000) {
+    if (!controlledFrames) return;
+    for (let remaining = duration; remaining > 0; remaining -= 16) {
+      animationTime += Math.min(remaining, 16);
+      for (const [id, callback] of [...pendingFrames]) {
+        if (pendingFrames.delete(id)) callback(animationTime);
+      }
+    }
+  }
+  Object.defineProperty(w, 'innerWidth', { value: width, configurable: true });
+  w.matchMedia = query => ({ matches: query.includes('reduced-motion') && reduced,
+    media: query, addEventListener() {}, removeEventListener() {} });
+  if (previousPanelOpen !== undefined) {
+    w.localStorage.setItem('lc-discuss-toc:panel-open', String(previousPanelOpen));
+  }
+  if (storageBlocked) Object.defineProperty(w, 'localStorage', {
+    get() { throw new w.DOMException('Storage blocked', 'SecurityError'); },
+  });
+  let scrollY = 0;
+  const jumps = [];
+  const geometry = w.Element.prototype.getBoundingClientRect;
+  w.Element.prototype.getBoundingClientRect = function () {
+    if (this.classList.contains('test-header') || this.tagName === 'NAV' && !this.closest('#main-content')) {
+      return w.DOMRect.fromRect({ x: 0, y: 0, width, height: 50 });
+    }
+    if (/^H[1-6]$/.test(this.tagName)) {
+      const index = [...w.document.querySelectorAll('h1,h2,h3,h4,h5,h6')].indexOf(this);
+      return w.DOMRect.fromRect({ x: 20, y: Number(this.dataset.top || (index + 1) * 500) - scrollY,
+        width: 700, height: 32 });
+    }
+    return geometry.call(this);
+  };
+  w.Element.prototype.scrollIntoView = function (options) {
+    jumps.push({ target: this, options, margin: this.style.scrollMarginTop });
+    scrollY += this.getBoundingClientRect().top - Number.parseFloat(this.style.scrollMarginTop || '0');
+    w.document.dispatchEvent(new w.Event('scroll'));
+  };
+  w.eval(source);
+  const shadow = () => w.document.getElementById('lc-discuss-toc')?.shadowRoot;
+  const links = () => [...(shadow()?.querySelectorAll('.heading-link') || [])];
+  const visible = () => links().filter(link => !link.parentElement.hidden).map(link => link.textContent);
+  const movePage = y => { scrollY = y; w.document.dispatchEvent(new w.Event('scroll')); };
+  return { w, shadow, links, visible, jumps, advance, movePage, run: () => w.eval(source),
+    get animationTime() { return animationTime; },
+    get pendingFrames() { return pendingFrames.size; },
+    get articleScrollY() { return scrollY; },
+    async scroll(y) {
+      movePage(y);
+      if (controlledFrames) advance();
+      else await wait(35);
+    },
+    async navigate(path, content) {
+      w.history.pushState({}, '', path);
+      w.document.querySelector('#main-content').outerHTML = content;
+      await wait();
+    },
+  };
+}
+
+function longArticle() {
+  return article(Array.from({ length: 12 }, (_, index) => {
+    const chapter = index + 1;
+    const top = index * 1000;
+    return `<h2 data-top="${top + 100}">第${chapter}章</h2>`
+      + `<h3 data-top="${top + 200}">§${chapter}.1 基础</h3>`
+      + `<h4 data-top="${top + 300}">§${chapter}.1.1 细节</h4>`
+      + `<h3 data-top="${top + 400}">§${chapter}.2 进阶</h3>`;
+  }).join(''));
+}
+
+// jsdom has no layout. Model a short, independently scrollable outline whose
+// row positions change as sections are folded, just as they do in a browser.
+function outlineViewport(p, height = 128) {
+  const root = p.shadow();
+  const navigation = root.querySelector('.navigation');
+  const visibleRows = () => [...root.querySelectorAll('.row')].filter(row => !row.hidden);
+  Object.defineProperties(navigation, {
+    clientHeight: { get: () => height },
+    clientTop: { get: () => 0 },
+    scrollHeight: { get: () => Math.max(height, visibleRows().length * 32 + 10) },
+  });
+  let scrollTop = 0;
+  const samples = [];
+  Object.defineProperties(navigation, {
+    scrollTop: {
+      get() { return scrollTop = Math.max(0, Math.min(scrollTop, navigation.scrollHeight - height)); },
+      set(value) {
+        scrollTop = Math.max(0, Math.min(Number(value), navigation.scrollHeight - height));
+        samples.push({ time: p.animationTime, top: scrollTop });
+      },
+    },
+    scrollSamples: { value: samples },
+  });
+  const previousGeometry = p.w.Element.prototype.getBoundingClientRect;
+  p.w.Element.prototype.getBoundingClientRect = function () {
+    if (this === navigation) return p.w.DOMRect.fromRect({ x: 1000, y: 180, width: 280, height });
+    if (this.classList.contains('row') && this.getRootNode() === root) {
+      if (this.hidden) return p.w.DOMRect.fromRect();
+      return p.w.DOMRect.fromRect({ x: 1000, y: 180 + visibleRows().indexOf(this) * 32 - navigation.scrollTop,
+        width: 260, height: 32 });
+    }
+    return previousGeometry.call(this);
+  };
+  return navigation;
+}
+
+function assertFollowed(p, title) {
+  p.advance();
+  const link = p.shadow().querySelector('[aria-current]');
+  assert.equal(link?.textContent, title);
+  assert.equal(link.parentElement.hidden, false);
+  const row = link.parentElement.getBoundingClientRect();
+  const viewport = p.shadow().querySelector('.navigation').getBoundingClientRect();
+  assert.ok(row.top >= viewport.top - 1, '当前目录项位于目录视口内');
+  assert.ok(row.bottom <= viewport.bottom + 1, '当前目录项没有被目录底部裁切');
+}
+
+function branchStates(p) {
+  return [...p.shadow().querySelectorAll('.branch')].map(branch => [
+    branch.parentElement.querySelector('.heading-link').textContent,
+    branch.getAttribute('aria-expanded'),
+  ]);
+}
+
+test('仅提取正文，包含 h4/h5/h6，排除文章大标题和评论', t => {
+  const p = page(t, { body: article('<h2>章节</h2><h3>小节</h3><h4>细节</h4><h5>第五级</h5><h6>第六级</h6>',
+    '<section><div class="markdown-content_markdown__test"><h2>评论里的标题</h2></div></section>') });
+  assert.deepEqual(p.visible(), ['章节', '小节', '细节', '第五级', '第六级']);
+  assert.equal(p.shadow().querySelector('.count,.status'), null);
+  assert.doesNotMatch(p.shadow().querySelector('.panel').textContent, /个章节|个匹配|共\s*\d+\s*节/);
+});
+
+test('跳级标题仍组成正确层级，折叠后不影响后续同级章节', t => {
+  const p = page(t, { body: article('<h2>甲</h2><h4>跳级小节</h4><h3>普通小节</h3><h2>乙</h2>') });
+  assert.deepEqual([...p.shadow().querySelectorAll('.row')].map(row => row.style.getPropertyValue('--depth')),
+    ['0', '1', '1', '0']);
+  p.shadow().querySelector('.branch').click();
+  assert.deepEqual(p.visible(), ['甲', '乙']);
+  p.shadow().querySelector('.branch').click();
+  assert.equal(p.visible().length, 4);
+});
+
+test('重复文字及重复 ID 按元素跳转，不会定位到另一个同名标题', t => {
+  const p = page(t, { body: article('<h2 id="same">基础</h2><h2 id="same">基础</h2>') });
+  const targets = p.w.document.querySelectorAll('.Body_markdown__test h2');
+  p.links()[1].click();
+  assert.equal(p.jumps[0].target, targets[1]);
+});
+
+test('点击标题平滑定位，并留出固定导航的 50px 和额外 16px', t => {
+  const p = page(t);
+  p.links()[2].click();
+  assert.equal(p.jumps[0].options.behavior, 'smooth');
+  assert.equal(p.jumps[0].options.block, 'start');
+  assert.equal(p.jumps[0].margin, '66px');
+  assert.equal(p.w.location.hash, '');
+});
+
+test('减少动态效果偏好使用即时跳转', t => {
+  const p = page(t, { reduced: true });
+  p.links()[0].click();
+  assert.equal(p.jumps[0].options.behavior, 'instant');
+});
+
+test('搜索保留匹配项的祖先，清空后恢复原有折叠状态', t => {
+  const p = page(t);
+  p.shadow().querySelector('.branch').click();
+  const search = p.shadow().querySelector('input');
+  search.value = '例题';
+  search.dispatchEvent(new p.w.Event('input'));
+  assert.deepEqual(p.visible(), ['第一章', '基础', '例题']);
+  search.value = '';
+  search.dispatchEvent(new p.w.Event('input'));
+  assert.deepEqual(p.visible(), ['第一章', '第二章']);
+});
+
+test('零搜索结果显示空状态，单个展开收起按钮可以恢复完整目录', t => {
+  const p = page(t);
+  const search = p.shadow().querySelector('input');
+  search.value = '不存在的章节';
+  search.dispatchEvent(new p.w.Event('input'));
+  assert.equal(p.visible().length, 0);
+  assert.equal(p.shadow().querySelector('.empty').hidden, false);
+  search.value = '';
+  search.dispatchEvent(new p.w.Event('input'));
+  const toggle = p.shadow().querySelector('.fold-all');
+  assert.equal(p.shadow().querySelectorAll('.tools button').length, 1);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+  assert.equal(toggle.querySelector('svg').dataset.icon, 'expand');
+  toggle.click();
+  assert.deepEqual(p.visible(), ['第一章', '第二章']);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(toggle.querySelector('svg').dataset.icon, 'collapse');
+  assert.equal(toggle.getAttribute('aria-label'), '全部展开');
+  toggle.click();
+  assert.equal(p.visible().length, 4);
+  assert.equal(toggle.querySelector('svg').dataset.icon, 'expand');
+});
+
+test('部分章节收起后，总开关显示收起状态，点击可全部展开', t => {
+  const p = page(t);
+  p.shadow().querySelector('.branch').click();
+  const toggle = p.shadow().querySelector('.fold-all');
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(toggle.querySelector('svg').dataset.icon, 'collapse');
+  toggle.click();
+  assert.equal(p.visible().length, 4);
+  assert.equal(toggle.getAttribute('aria-expanded'), 'true');
+});
+
+test('搜索时不显示章节或匹配数量，并暂时禁用总开关', t => {
+  const p = page(t);
+  const input = p.shadow().querySelector('input');
+  input.value = '例题';
+  input.dispatchEvent(new p.w.Event('input'));
+  assert.equal(p.shadow().querySelector('.fold-all').disabled, true);
+  assert.doesNotMatch(p.shadow().querySelector('.panel').textContent, /个章节|个匹配|共\s*\d+\s*节/);
+  input.value = '';
+  input.dispatchEvent(new p.w.Event('input'));
+  assert.equal(p.shadow().querySelector('.fold-all').disabled, false);
+});
+
+test('长章节内没有可见标题时，仍高亮所属章节；向上滚动也正确', async t => {
+  const p = page(t, { body: article('<h2 data-top="100">开头</h2><h2 data-top="10000">下一章</h2>') });
+  await p.scroll(7000);
+  assert.equal(p.shadow().querySelector('[aria-current]').textContent, '开头');
+  await p.scroll(10000);
+  assert.equal(p.shadow().querySelector('[aria-current]').textContent, '下一章');
+  await p.scroll(0);
+  assert.equal(p.shadow().querySelector('[aria-current]').textContent, '开头');
+});
+
+test('页面到底时，无法滚到顶部的末尾标题仍可高亮', async t => {
+  const p = page(t, { body: article('<h2 data-top="100">开头</h2><h2 data-top="2800">末尾</h2>') });
+  const root = p.w.document.documentElement;
+  Object.defineProperties(root, {
+    scrollHeight: { value: 3000 },
+    scrollTop: { value: 3000 - p.w.innerHeight, configurable: true },
+  });
+  await p.scroll(3000 - p.w.innerHeight);
+  assert.equal(p.shadow().querySelector('[aria-current]').textContent, '末尾');
+});
+
+test('异步加载正文后自动出现目录', async t => {
+  const p = page(t, { body: '<main id="main-content"><p>加载中</p></main>' });
+  assert.equal(p.shadow(), undefined);
+  p.w.document.querySelector('main').innerHTML = '<div class="Body_markdown__test"><h2>异步章节</h2></div>';
+  await wait();
+  assert.deepEqual(p.visible(), ['异步章节']);
+});
+
+test('正文开始没有标题，后续追加标题也能被识别', async t => {
+  const p = page(t, { body: article('<p>暂无章节</p>') });
+  assert.equal(p.shadow(), undefined);
+  p.w.document.querySelector('.Body_markdown__test').insertAdjacentHTML('beforeend', '<h2>新增</h2>');
+  await wait();
+  assert.deepEqual(p.visible(), ['新增']);
+});
+
+test('正文标题改名、增删后自动更新', async t => {
+  const p = page(t);
+  p.w.document.querySelector('.Body_markdown__test h2').firstChild.data = '新章节名';
+  await wait();
+  assert.equal(p.links()[0].textContent, '新章节名');
+  p.w.document.querySelector('.Body_markdown__test h4').remove();
+  await wait();
+  assert.equal(p.links().length, 3);
+});
+
+test('更新代码块和评论不会重建目录或丢失搜索状态', async t => {
+  const p = page(t, { body: article('<h2>章节</h2><pre><code>原代码</code></pre>',
+    '<div class="comments">评论</div>') });
+  const originalLink = p.links()[0];
+  const search = p.shadow().querySelector('input');
+  search.value = '章节';
+  p.w.document.querySelector('code').textContent = '切换语言后的代码';
+  p.w.document.querySelector('.comments').innerHTML = '<h2>新增评论标题</h2>';
+  await wait();
+  assert.equal(p.links()[0], originalLink);
+  assert.equal(search.value, '章节');
+  assert.equal(p.links().length, 1);
+});
+
+test('SPA 切换文章更新目录，并在离开文章页时清理', async t => {
+  const p = page(t);
+  await p.navigate('/discuss/post/1002/next/', article('<h2>新文章</h2>'));
+  assert.deepEqual(p.visible(), ['新文章']);
+  assert.equal(p.w.document.querySelectorAll('#lc-discuss-toc').length, 1);
+  await p.navigate('/problemset/', '<main id="main-content"><h2>题库</h2></main>');
+  assert.equal(p.shadow(), undefined);
+  await p.navigate('/discuss/post/1003/third/', article('<h2>返回文章</h2>'));
+  assert.deepEqual(p.visible(), ['返回文章']);
+});
+
+test('非文章页启动后，站内进入文章也能挂载', async t => {
+  const p = page(t, { url: 'https://leetcode.cn/problemset/', body: '<main id="main-content">题库</main>' });
+  assert.equal(p.shadow(), undefined);
+  await p.navigate('/discuss/post/1004/demo/', article('<h2>进入文章</h2>'));
+  assert.deepEqual(p.visible(), ['进入文章']);
+});
+
+test('URL hash 变化不会重置搜索和目录状态', async t => {
+  const p = page(t);
+  const link = p.links()[0];
+  p.shadow().querySelector('input').value = '基础';
+  p.w.history.pushState({}, '', '#existing-heading');
+  p.w.dispatchEvent(new p.w.Event('urlchange'));
+  await wait();
+  assert.equal(p.links()[0], link);
+  assert.equal(p.shadow().querySelector('input').value, '基础');
+});
+
+test('目录按钮引用过期时不跳转旧元素，随后更新新正文', async t => {
+  const p = page(t);
+  const oldLink = p.links()[0];
+  p.w.document.querySelector('.Body_markdown__test').innerHTML = '<h2>替换后的标题</h2>';
+  oldLink.click();
+  assert.equal(p.jumps.length, 0);
+  await wait();
+  assert.deepEqual(p.visible(), ['替换后的标题']);
+});
+
+test('重复注入只保留一份实例，销毁后恢复标题原有样式', t => {
+  const p = page(t, { body: article('<h2 style="scroll-margin-top:12px!important">章节</h2>') });
+  p.run();
+  assert.equal(p.w.document.querySelectorAll('#lc-discuss-toc').length, 1);
+  p.w.__leetcodeDiscussToc__.destroy();
+  const heading = p.w.document.querySelector('.Body_markdown__test h2');
+  assert.equal(heading.style.scrollMarginTop, '12px');
+  assert.equal(heading.style.getPropertyPriority('scroll-margin-top'), 'important');
+  assert.equal(p.shadow(), undefined);
+});
+
+test('浏览器禁用存储时，目录仍然可正常使用', t => {
+  const p = page(t, { storageBlocked: true });
+  p.links()[0].click();
+  assert.equal(p.jumps.length, 1);
+  p.shadow().querySelector('[aria-label="收起目录"]').click();
+  assert.equal(p.shadow().querySelector('.launcher').hidden, false);
+});
+
+test('窄屏及旧版收起偏好都默认展开，进入新文章也默认展开', async t => {
+  const p = page(t, { width: 390, previousPanelOpen: false });
+  assert.equal(p.shadow().querySelector('.panel').hidden, false);
+  p.shadow().querySelector('input').dispatchEvent(new p.w.KeyboardEvent('keydown', {
+    key: 'Escape', bubbles: true, composed: true,
+  }));
+  assert.equal(p.shadow().querySelector('.panel').hidden, true);
+  await p.navigate('/discuss/post/1005/mobile/', article('<h2>新文章</h2><h3>小节</h3>'));
+  assert.equal(p.shadow().querySelector('.panel').hidden, false);
+  assert.deepEqual(p.visible(), ['新文章', '小节']);
+});
+
+test('焦点在正文且页面拦截冒泡时，键盘 Esc 仍收起目录并保留正文焦点', t => {
+  const p = page(t);
+  const title = p.w.document.querySelector('h1');
+  title.tabIndex = 0;
+  title.focus();
+  p.w.document.body.addEventListener('keydown', event => event.stopPropagation());
+  title.dispatchEvent(new p.w.KeyboardEvent('keydown', {
+    key: 'Escape', bubbles: true, composed: true, cancelable: true,
+  }));
+  assert.equal(p.shadow().querySelector('.panel').hidden, true);
+  assert.equal(p.w.document.activeElement, title);
+});
+
+test('底部 Esc 收起按钮可以点击，并可重新打开目录', t => {
+  const p = page(t);
+  p.shadow().querySelector('.escape-button').click();
+  assert.equal(p.shadow().querySelector('.panel').hidden, true);
+  assert.equal(p.shadow().querySelector('.launcher').hidden, false);
+  p.shadow().querySelector('.launcher').click();
+  assert.equal(p.shadow().querySelector('.panel').hidden, false);
+});
+
+test('输入法组合输入期间 Esc 不误关目录，普通 Esc 仍可关闭', t => {
+  const p = page(t);
+  const input = p.shadow().querySelector('input');
+  input.dispatchEvent(new p.w.KeyboardEvent('keydown', {
+    key: 'Escape', bubbles: true, composed: true, isComposing: true,
+  }));
+  assert.equal(p.shadow().querySelector('.panel').hidden, false);
+  input.dispatchEvent(new p.w.KeyboardEvent('keydown', {
+    key: 'Escape', bubbles: true, composed: true,
+  }));
+  assert.equal(p.shadow().querySelector('.panel').hidden, true);
+});
+
+test('同一篇文章异步更新不会重新打开手动收起的目录，重新加载脚本则默认展开', async t => {
+  const p = page(t);
+  p.shadow().querySelector('.escape-button').click();
+  p.w.document.querySelector('.Body_markdown__test').insertAdjacentHTML('beforeend', '<h2>异步标题</h2>');
+  await wait();
+  assert.equal(p.shadow().querySelector('.panel').hidden, true);
+  p.run();
+  assert.equal(p.shadow().querySelector('.panel').hidden, false);
+});
+
+test('网站切换深浅色时同步主题', async t => {
+  const p = page(t);
+  assert.equal(p.w.document.getElementById('lc-discuss-toc').dataset.theme, 'light');
+  p.w.document.documentElement.className = 'dark';
+  await wait(15);
+  assert.equal(p.w.document.getElementById('lc-discuss-toc').dataset.theme, 'dark');
+});
+
+test('备用正文选择器生效，空标题与隐藏标题不进入目录', t => {
+  const p = page(t, { body: '<main><div class="markdown-content_markdown__new"><h1>正文一级</h1>'
+    + '<h2> </h2><h2 hidden>隐藏</h2><h3>可见</h3></div>'
+    + '<div class="markdown-content_markdown__new"><h2>评论</h2></div></main>' });
+  assert.deepEqual(p.visible(), ['正文一级', '可见']);
+});
+
+test('标题内容作为文本展示，标题没有 ID 时也可以跳转', t => {
+  const p = page(t, { body: article('<h2>&lt;img src=x onerror=alert(1)&gt;</h2>') });
+  assert.equal(p.links()[0].textContent, '<img src=x onerror=alert(1)>');
+  assert.equal(p.shadow().querySelector('img'), null);
+  p.links()[0].click();
+  assert.equal(p.jumps[0].target.id, '');
+});
+
+test('全部展开时，目录跟随到第八章，只滚动目录且不改变正文位置或焦点', async t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  const title = p.w.document.querySelector('h1');
+  title.tabIndex = 0;
+  title.focus();
+  await p.scroll(7134);
+  assertFollowed(p, '§8.1 基础');
+  assert.ok(navigation.scrollTop > 0);
+  assert.equal(p.articleScrollY, 7134);
+  assert.equal(p.jumps.length, 0, '跟随目录不能对正文或目录项调用 scrollIntoView');
+  assert.equal(p.w.document.activeElement, title);
+  await p.scroll(0);
+  assertFollowed(p, '第1章');
+  assert.equal(navigation.scrollTop, 0);
+});
+
+test('全部收起时，跟随并高亮当前小节所属的可见章节，保持全部收起', async t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  outlineViewport(p);
+  p.shadow().querySelector('.fold-all').click();
+  const before = branchStates(p);
+  await p.scroll(7134);
+  assertFollowed(p, '第8章');
+  assert.deepEqual(branchStates(p), before);
+  assert.equal(p.visible().length, 12);
+  assert.equal(p.shadow().querySelector('.fold-all').getAttribute('aria-expanded'), 'false');
+});
+
+test('部分展开时跟随可见上级，手动折叠只更新高亮，正文再滚动后跟随当前小节', async t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  p.shadow().querySelector('[aria-label="折叠 第2章"]').click();
+  p.shadow().querySelector('[aria-label="折叠 §8.1 基础"]').click();
+  const before = branchStates(p);
+  await p.scroll(7234);
+  assertFollowed(p, '§8.1 基础');
+  assert.deepEqual(branchStates(p), before);
+  const stopped = navigation.scrollTop;
+  p.shadow().querySelector('[aria-label="折叠 第8章"]').click();
+  p.advance();
+  assert.equal(p.shadow().querySelector('[aria-current]').textContent, '第8章');
+  assert.equal(navigation.scrollTop, stopped);
+  p.shadow().querySelector('[aria-label="展开 第8章"]').click();
+  p.advance();
+  assert.equal(p.shadow().querySelector('[aria-current]').textContent, '§8.1 基础');
+  assert.equal(navigation.scrollTop, stopped);
+  p.shadow().querySelector('[aria-label="展开 §8.1 基础"]').click();
+  p.advance();
+  assert.equal(p.shadow().querySelector('[aria-current]').textContent, '§8.1.1 细节');
+  assert.equal(navigation.scrollTop, stopped);
+  p.movePage(7235);
+  assertFollowed(p, '§8.1.1 细节');
+  assert.equal(p.shadow().querySelector('[aria-label="展开 第2章"]').getAttribute('aria-expanded'), 'false');
+});
+
+test('手动全部展开或收起保留目录浏览位置，正文再滚动后恢复跟随', async t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  await p.scroll(7234);
+  navigation.scrollTop = 0;
+  p.shadow().querySelector('.fold-all').click();
+  p.advance();
+  assert.equal(navigation.scrollTop, 0);
+  assert.equal(p.shadow().querySelector('[aria-current]').textContent, '第8章');
+  p.shadow().querySelector('.fold-all').click();
+  p.advance();
+  assert.equal(navigation.scrollTop, 0);
+  assert.equal(p.shadow().querySelector('[aria-current]').textContent, '§8.1.1 细节');
+  p.movePage(7235);
+  assertFollowed(p, '§8.1.1 细节');
+});
+
+test('点击其他章节展开或收起不把目录拉回正文所在章节', async t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  await p.scroll(7134);
+  navigation.scrollTop = 0;
+  // Direct click also covers keyboard activation without a preceding pointerdown.
+  p.shadow().querySelector('[aria-label="折叠 第1章"]').click();
+  p.advance();
+  assert.equal(navigation.scrollTop, 0);
+  assert.equal(p.shadow().querySelector('[aria-current]').textContent, '§8.1 基础');
+  p.shadow().querySelector('[aria-label="展开 第1章"]').click();
+  p.advance();
+  assert.equal(navigation.scrollTop, 0);
+  assert.equal(p.articleScrollY, 7134);
+  assert.equal(p.jumps.length, 0);
+  p.movePage(7135);
+  assertFollowed(p, '§8.1 基础');
+});
+
+test('手动折叠后，已经排队的位置更新帧只更新高亮，不重新启动跟随', t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  p.movePage(7234);
+  navigation.scrollTop = 64;
+  p.shadow().querySelector('[aria-label="折叠 第1章"]').click();
+  p.advance();
+  assert.equal(navigation.scrollTop, 64);
+  assert.equal(p.shadow().querySelector('[aria-current]').textContent, '§8.1.1 细节');
+  assert.equal(p.pendingFrames, 0);
+  p.movePage(7235);
+  assertFollowed(p, '§8.1.1 细节');
+});
+
+test('跟随动画中手动折叠会立即停止，展开后也保持停止，正文滚动后平滑恢复', t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  p.movePage(7134);
+  p.advance(64);
+  assert.ok(navigation.scrollTop > 0);
+  p.shadow().querySelector('[aria-label="折叠 第1章"]').click();
+  const stopped = navigation.scrollTop;
+  p.advance();
+  assert.equal(navigation.scrollTop, stopped);
+  p.shadow().querySelector('[aria-label="展开 第1章"]').click();
+  p.advance();
+  assert.equal(navigation.scrollTop, stopped);
+  assert.equal(p.pendingFrames, 0);
+  p.movePage(7135);
+  p.advance(16);
+  assert.equal(navigation.scrollTop, stopped, '恢复时只更新动画目标');
+  assertFollowed(p, '§8.1 基础');
+});
+
+test('手动折叠后 resize、图片加载和正文变化只更新高亮，不抢占目录位置', async t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  await p.scroll(7134);
+  navigation.scrollTop = 0;
+  p.shadow().querySelector('[aria-label="折叠 第1章"]').click();
+  p.advance();
+  p.w.dispatchEvent(new p.w.Event('resize'));
+  p.advance();
+  assert.equal(navigation.scrollTop, 0, '窗口尺寸变化不恢复自动跟随');
+  const body = p.w.document.querySelector('.Body_markdown__test');
+  const image = p.w.document.createElement('img');
+  body.append(image);
+  await Promise.resolve();
+  p.advance();
+  image.dispatchEvent(new p.w.Event('load'));
+  p.advance();
+  assert.equal(navigation.scrollTop, 0, '图片加载不恢复自动跟随');
+  body.append(p.w.document.createElement('p'));
+  body.lastChild.textContent = '异步更新的正文段落';
+  await Promise.resolve();
+  p.advance();
+  assert.equal(navigation.scrollTop, 0, '正文变化不恢复自动跟随');
+  assert.equal(p.shadow().querySelector('[aria-current]').textContent, '§8.1 基础');
+  p.movePage(7135);
+  assertFollowed(p, '§8.1 基础');
+});
+
+test('手动浏览目录后，无关页面区域滚动不恢复跟随，文章外层滚动才恢复', async t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  await p.scroll(7134);
+  navigation.scrollTop = 0;
+  p.shadow().querySelector('[aria-label="折叠 第1章"]').click();
+  const unrelated = p.w.document.createElement('aside');
+  p.w.document.body.append(unrelated);
+  unrelated.dispatchEvent(new p.w.Event('scroll'));
+  p.advance();
+  assert.equal(navigation.scrollTop, 0);
+  p.movePage(7135);
+  assertFollowed(p, '§8.1 基础');
+});
+
+for (const [name, event] of [
+  ['滚轮', w => new w.WheelEvent('wheel', { deltaY: -100, bubbles: true, composed: true })],
+  ['鼠标按下', w => new w.Event('pointerdown', { bubbles: true, composed: true })],
+  ['触摸', w => new w.Event('touchstart', { bubbles: true, composed: true })],
+  ['键盘', w => new w.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, composed: true })],
+]) {
+  test(`目录${name}操作暂停待执行跟随，尺寸变化不解除，正文滚动后恢复`, async t => {
+    const p = page(t, { body: longArticle(), controlledFrames: true });
+    const navigation = outlineViewport(p);
+    await p.scroll(7134);
+    p.movePage(7135);
+    navigation.dispatchEvent(event(p.w));
+    navigation.scrollTop = 0;
+    p.w.dispatchEvent(new p.w.Event('resize'));
+    p.advance();
+    assert.equal(navigation.scrollTop, 0);
+    p.movePage(7136);
+    assertFollowed(p, '§8.1 基础');
+  });
+}
+
+for (const [name, resume] of [
+  ['重新打开目录', p => {
+    p.shadow().querySelector('.escape-button').click();
+    p.shadow().querySelector('.launcher').click();
+  }],
+  ['清空搜索', p => {
+    const input = p.shadow().querySelector('input');
+    input.value = '章';
+    input.dispatchEvent(new p.w.Event('input'));
+    input.value = '';
+    input.dispatchEvent(new p.w.Event('input'));
+  }],
+  ['点击章节跳转', p => p.shadow().querySelector('[aria-label="§8.1 基础"]').click()],
+]) {
+  test(`手动折叠暂停后，${name}可以主动恢复跟随`, async t => {
+    const p = page(t, { body: longArticle(), controlledFrames: true });
+    const navigation = outlineViewport(p);
+    await p.scroll(7134);
+    navigation.scrollTop = 0;
+    p.shadow().querySelector('[aria-label="折叠 第1章"]').click();
+    p.advance();
+    assert.equal(navigation.scrollTop, 0);
+    resume(p);
+    assertFollowed(p, '§8.1 基础');
+  });
+}
+
+test('面板关闭时记录阅读位置，重新打开后跟随并保留原有收起状态', async t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  p.shadow().querySelector('.fold-all').click();
+  p.shadow().querySelector('.escape-button').click();
+  const before = branchStates(p);
+  await p.scroll(7234);
+  assert.equal(p.shadow().querySelector('.panel').hidden, true);
+  assert.equal(navigation.scrollTop, 0);
+  p.shadow().querySelector('.launcher').click();
+  await wait(35);
+  assertFollowed(p, '第8章');
+  assert.deepEqual(branchStates(p), before);
+});
+
+test('搜索期间不抢占结果滚动位置，清空后跟随正文当前章节', async t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  const input = p.shadow().querySelector('input');
+  input.focus();
+  input.value = '章';
+  input.dispatchEvent(new p.w.Event('input'));
+  navigation.scrollTop = 64;
+  await p.scroll(7134);
+  assert.equal(navigation.scrollTop, 64);
+  assert.equal(input.value, '章');
+  assert.equal(p.shadow().activeElement, input);
+  input.value = '';
+  input.dispatchEvent(new p.w.Event('input'));
+  assertFollowed(p, '§8.1 基础');
+});
+
+test('手动滚动目录不会被拉回，正文再次滚动后即使章节未变也重新跟随', async t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  await p.scroll(7134);
+  navigation.scrollTop = 0;
+  navigation.dispatchEvent(new p.w.Event('scroll', { bubbles: true, composed: true }));
+  await wait(35);
+  assert.equal(navigation.scrollTop, 0);
+  await p.scroll(7135);
+  assertFollowed(p, '§8.1 基础');
+});
+
+test('正文停止滚动且动画结束后，目录不自行漂移', async t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  await p.scroll(7134);
+  const before = navigation.scrollTop;
+  p.advance();
+  assert.equal(navigation.scrollTop, before);
+  assertFollowed(p, '§8.1 基础');
+});
+
+test('目录通过多个动画帧渐进移动，不在第一帧直接跳到目标', t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  p.movePage(7134);
+  p.advance(16);
+  assert.equal(navigation.scrollTop, 0, '定位帧只更新目标，不瞬移目录');
+  p.advance(16);
+  const firstStep = navigation.scrollTop;
+  assert.ok(firstStep > 0);
+  p.advance();
+  assert.ok(firstStep < navigation.scrollTop / 2);
+  assert.ok(new Set(navigation.scrollSamples.map(sample => sample.top)).size > 8);
+  assertFollowed(p, '§8.1 基础');
+  assert.equal(p.articleScrollY, 7134);
+  assert.equal(p.jumps.length, 0);
+});
+
+test('同一小节内持续滚动正文时，目录也连续移动，不依赖标题切换', async t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  const positions = [];
+  for (const y of [7234, 7244, 7254, 7264, 7274]) {
+    await p.scroll(y);
+    positions.push(navigation.scrollTop);
+    assert.equal(p.shadow().querySelector('[aria-current]').textContent, '§8.1.1 细节');
+  }
+  for (let i = 1; i < positions.length; i++) assert.ok(positions[i] > positions[i - 1]);
+  assert.ok(positions.at(-1) - positions[0] < 32, '按段落进度插值，而非跳过整行');
+});
+
+test('快速反向滚动时从当前位置改追新目标，不排队播放旧动画', t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  p.movePage(7134);
+  p.advance(96);
+  assert.ok(navigation.scrollTop > 0);
+  p.movePage(2134);
+  p.advance(32);
+  const start = navigation.scrollTop;
+  navigation.scrollSamples.length = 0;
+  p.advance();
+  let previous = start;
+  for (const sample of navigation.scrollSamples) {
+    assert.ok(sample.top <= previous, '反向后持续向新目标移动');
+    previous = sample.top;
+  }
+  assertFollowed(p, '§3.1 基础');
+  assert.equal(p.pendingFrames, 0);
+});
+
+test('全部收起时，在章节末尾也平滑向下一个可见章节移动，且不展开分支', async t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  p.shadow().querySelector('.fold-all').click();
+  const before = branchStates(p);
+  await p.scroll(7484);
+  const first = navigation.scrollTop;
+  await p.scroll(7584);
+  assert.ok(navigation.scrollTop > first);
+  assertFollowed(p, '第8章');
+  assert.deepEqual(branchStates(p), before);
+});
+
+test('面板收起时立即停止未完成动画，重新打开从当前滚动位置平滑跟随', t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  p.movePage(7134);
+  p.advance(64);
+  p.shadow().querySelector('.escape-button').click();
+  const stopped = navigation.scrollTop;
+  p.advance();
+  assert.equal(navigation.scrollTop, stopped);
+  p.movePage(2134);
+  p.advance();
+  assert.equal(navigation.scrollTop, stopped);
+  p.shadow().querySelector('.launcher').click();
+  assert.equal(navigation.scrollTop, stopped);
+  assertFollowed(p, '§3.1 基础');
+});
+
+test('开始搜索会取消进行中的动画，清空后重新平滑跟随', t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  p.movePage(7134);
+  p.advance(64);
+  const input = p.shadow().querySelector('input');
+  input.value = '章';
+  input.dispatchEvent(new p.w.Event('input'));
+  const stopped = navigation.scrollTop;
+  p.advance();
+  assert.equal(navigation.scrollTop, stopped);
+  input.value = '';
+  input.dispatchEvent(new p.w.Event('input'));
+  navigation.scrollSamples.length = 0;
+  assert.equal(navigation.scrollTop, stopped);
+  assertFollowed(p, '§8.1 基础');
+  assert.ok(navigation.scrollSamples.length > 5);
+});
+
+test('减少动态效果时保持即时定位，不启动跟随动画', t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true, reduced: true });
+  const navigation = outlineViewport(p);
+  p.movePage(7134);
+  p.advance(16);
+  assert.ok(navigation.scrollTop > 0);
+  assert.equal(p.pendingFrames, 0);
+  assertFollowed(p, '§8.1 基础');
+});
+
+test('销毁实例会取消未完成的跟随动画', t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  p.movePage(7134);
+  p.advance(64);
+  const stopped = navigation.scrollTop;
+  p.w.__leetcodeDiscussToc__.destroy();
+  p.advance();
+  assert.equal(navigation.scrollTop, stopped);
+  assert.equal(p.pendingFrames, 0);
+  assert.equal(p.shadow(), undefined);
+});
+
+test('手动滚动目录会取消动画，正文再次滚动时恢复跟随', t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  p.movePage(7134);
+  p.advance(64);
+  navigation.dispatchEvent(new p.w.WheelEvent('wheel', { deltaY: -100, bubbles: true, composed: true }));
+  navigation.scrollTop = 0;
+  p.advance();
+  assert.equal(navigation.scrollTop, 0);
+  p.movePage(7135);
+  assertFollowed(p, '§8.1 基础');
+});
+
+test('连续外层滚动只更新一个跟随动画的目标，不创建重复动画队列', t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  outlineViewport(p);
+  for (let y = 3234; y <= 7334; y += 100) {
+    p.movePage(y);
+    p.advance(16);
+    assert.ok(p.pendingFrames <= 2, '最多一个位置更新帧和一个动画帧');
+  }
+  p.advance();
+  assert.equal(p.pendingFrames, 0);
+  assertFollowed(p, '§8.2 进阶');
+});

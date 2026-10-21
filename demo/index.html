@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN" class="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>力扣文章目录 · 本地演示</title>
+  <style>
+    *{box-sizing:border-box}html{scroll-behavior:auto}body{margin:0;background:#f7f8fa;color:#293348;
+      font:15px/1.9 -apple-system,BlinkMacSystemFont,"PingFang SC",sans-serif}
+    .topbar{position:fixed;inset:0 0 auto;height:50px;background:#fff;border-bottom:1px solid #e7ebf0;z-index:20}
+    .topbar nav{display:flex;gap:28px;align-items:center;height:50px;padding:0 28px;font-size:13px}
+    .wordmark{font-weight:700;font-size:16px;color:#ad610b}.topbar span{color:#8a93a0}
+    main{margin:0 auto;padding:96px 340px 100px 40px;max-width:1280px}
+    .eyebrow{color:#b36a12;font-size:11px;letter-spacing:2px;font-weight:600}
+    h1{font-size:30px;line-height:1.5;letter-spacing:-.7px;margin:12px 0}h2{font-size:24px;margin:48px 0 16px}
+    h3{font-size:19px;margin:32px 0 12px}h4{font-size:16px;margin:24px 0 10px}
+    .intro{color:#8390a1;font-size:13px}.controls{display:flex;gap:8px;flex-wrap:wrap;margin:24px 0 32px}
+    button{font:inherit;font-size:12px;border:1px solid #dfe4eb;background:#fff;border-radius:7px;padding:6px 12px;cursor:pointer}
+    .Body_markdown__demo{padding:4px 28px 40px;background:#fff;border:1px solid #e7ebf0;border-radius:14px}
+    .lead{border-left:3px solid #dba35e;padding-left:14px;color:#7c8796;font-size:13px}
+    .problem-list{list-style:none;padding:0}.problem-list li{padding:8px 0;border-bottom:1px solid #f0f2f5;color:#738199;font-size:13px}
+    .problem-list a{color:#43689b;text-decoration:none}.tag{color:#ad8c62;font-size:11px;margin-left:10px}
+    pre{padding:18px 22px;border-radius:9px;background:#f5f7fa;color:#47627b;font-size:12px;line-height:1.8;overflow:auto}
+    .comments{margin-top:40px;color:#8a93a0;font-size:13px}.comments h3{font-size:14px}
+    .dark body{background:#191b20;color:#e2e6ed}.dark .topbar,.dark .Body_markdown__demo,.dark button{background:#25272b;color:#e2e6ed;border-color:#393e47}
+    .dark pre{background:#1c1e24;color:#b6cadb}.dark .problem-list li{border-color:#393e47}
+    @media(max-width:850px){main{padding:80px 20px 60px}h1{font-size:24px}.Body_markdown__demo{padding:0 20px 24px}}
+  </style>
+  <script src="/demo/demo.js" defer></script>
+  <script src="/leetcode-discuss-toc.user.js" defer></script>
+</head>
+<body>
+  <div class="topbar"><nav><div class="wordmark">◩ 文章目录</div><span>交互演示</span><span>多级标题 / 正文隔离 / 快速定位</span></nav></div>
+  <main id="main-content">
+    <div class="eyebrow">LEETCODE · READING TOOLS</div>
+    <h1>常用数据结构 · 学习题单</h1>
+    <p class="intro">本地模拟文章。右侧目录由同一份油猴脚本实时生成，可搜索、折叠并跳转。</p>
+    <div class="controls">
+      <button id="demo-follow">演示平滑跟随</button>
+      <button id="switch-article">切换文章</button>
+      <button id="add-heading">异步追加章节</button>
+      <button id="toggle-theme">切换深浅色</button>
+    </div>
+    <div id="article" class="markdown-content_markdown__demo Body_markdown__demo"></div>
+    <section class="comments"><p>评论区（不应进入目录）</p>
+      <div class="markdown-content_markdown__demo"><h3>评论中的干扰标题</h3><p>目录只收集文章正文。</p></div>
+    </section>
+  </main>
+</body>
+</html>

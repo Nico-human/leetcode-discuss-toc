@@ -1,0 +1,16 @@
+{
+  "name": "leetcode-discuss-toc",
+  "version": "1.0.5",
+  "private": true,
+  "description": "力扣讨论文章的浮动多级目录油猴脚本",
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "check": "node --check leetcode-discuss-toc.user.js",
+    "test": "node --test tests/*.test.mjs",
+    "demo": "node scripts/serve-demo.mjs"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
+  }
+}
