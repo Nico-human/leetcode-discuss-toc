@@ -705,7 +705,8 @@ test('SPA 切换文章更新目录，并在离开文章页时清理', async t =>
   assert.deepEqual(p.visible(), ['返回文章']);
 });
 
-test('非文章页启动后，站内进入文章也能挂载', async t => {
+// This fixture explicitly evaluates the source and bypasses userscript metadata.
+test('手动注入的脚本可响应非文章页到文章页的站内切换', async t => {
   const p = page(t, { url: 'https://leetcode.cn/problemset/', body: '<main id="main-content">题库</main>' });
   assert.equal(p.shadow(), undefined);
   await p.navigate('/discuss/post/1004/demo/', article('<h2>进入文章</h2>'));

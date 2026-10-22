@@ -1,12 +1,17 @@
 // ==UserScript==
 // @name         力扣讨论 · 文章目录
 // @namespace    local.leetcode-discuss-toc
-// @version      1.0.11
+// @version      1.0.12
 // @description  为力扣讨论文章生成悬停展开、可搜索、可折叠、自动高亮的多级目录，点击即可跳转。
-// @match        https://leetcode.cn/*
+// @source       https://github.com/Nico-human/leetcode-discuss-toc
+// @supportURL   https://greasyfork.org/zh-CN/scripts/601597-%E5%8A%9B%E6%89%A3%E8%AE%A8%E8%AE%BA-%E6%96%87%E7%AB%A0%E7%9B%AE%E5%BD%95/feedback
+// @supportURL   https://github.com/Nico-human/leetcode-discuss-toc/issues
+// @match        https://leetcode.cn/discuss/post/*
+// @match        https://leetcode.com/discuss/post/*
 // @run-at       document-idle
 // @grant        window.onurlchange
 // @noframes
+// @author       Nico-human
 // @license      MIT
 // ==/UserScript==
 
