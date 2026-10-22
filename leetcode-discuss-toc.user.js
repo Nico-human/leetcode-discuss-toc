@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         力扣讨论 · 文章目录
 // @namespace    local.leetcode-discuss-toc
-// @version      1.0.6
-// @description  为力扣讨论文章生成可搜索、可折叠、自动高亮的多级目录，点击即可跳转。
+// @version      1.0.11
+// @description  为力扣讨论文章生成悬停展开、可搜索、可折叠、自动高亮的多级目录，点击即可跳转。
 // @match        https://leetcode.cn/*
 // @run-at       document-idle
 // @grant        window.onurlchange
@@ -31,6 +31,7 @@
   let entries = [];
   let activeEntry = null;
   let visibleActiveEntry = null;
+  let previewActiveEntry = null;
   let host = null;
   let ui = null;
   let path = location.pathname;
@@ -44,7 +45,11 @@
   let routeTimer = 0;
   let destroyed = false;
   let topInset = 66;
-  let panelOpen = true;
+  let panelOpen = false;
+  let closeTimer = 0;
+  let pointerInside = false;
+  let keyboardFocus = false;
+  let movingFocus = false;
   let collapsed = new Set();
   const savedMargins = new Map();
   const cleanups = [];
@@ -75,7 +80,6 @@
     const paths = {
       list: 'M4 5h16M4 12h16M4 19h10',
       search: 'm20 20-4.5-4.5M17 10a7 7 0 1 1-14 0 7 7 0 0 1 14 0',
-      close: 'm6 6 12 12M6 18 18 6',
       chevron: 'm9 5 7 7-7 7',
       expand: 'm8 9 4-4 4 4M8 15l4 4 4-4',
       collapse: 'm8 5 4 4 4-4M8 19l4-4 4 4',
@@ -94,24 +98,58 @@
   }
 
   function setPanelOpen(open, focus = false) {
+    clearTimeout(closeTimer);
+    closeTimer = 0;
+    const changed = panelOpen !== open;
+    if (ui && open && changed) {
+      // Finish pending article measurements while the panel is still offscreen.
+      // Opening then only animates its horizontal position, never a catch-up scroll.
+      followPaused = false;
+      if (frame) cancelAnimationFrame(frame);
+      frame = 0;
+      updateActiveEntry();
+    }
     panelOpen = open;
     if (!ui) return;
-    ui.panel.hidden = !open;
-    ui.launcher.hidden = open;
+    host.dataset.open = String(open);
+    // Keep both surfaces laid out so CSS can interpolate in either direction.
+    // Inert makes the inactive surface immediately unavailable to input/focus.
+    ui.panel.inert = !open;
+    ui.launcher.inert = open;
     ui.launcher.setAttribute('aria-expanded', String(open));
-    if (!open) stopFollowing();
-    if (focus) (open ? ui.search : ui.launcher).focus({ preventScroll: true });
-    if (open) {
-      followPaused = false;
-      requestActiveUpdate();
+    if (!open) {
+      keyboardFocus = false;
+      syncCurrentEntry();
     }
+    if (focus && open) {
+      // Programmatic focus transfer should not trigger a second open request.
+      movingFocus = true;
+      ui.search.focus({ preventScroll: true });
+      movingFocus = false;
+    } else if (!open && ui.panel.contains(ui.shadow.activeElement)) {
+      ui.shadow.activeElement.blur();
+    }
+    ui.panel.setAttribute('aria-hidden', String(!open));
+    ui.launcher.setAttribute('aria-hidden', String(open));
   }
 
-  function handleEscape(event) {
-    if (event.key !== 'Escape' || event.isComposing || !panelOpen || !ui) return;
-    event.preventDefault();
-    // Keep focus in the article when Escape was pressed outside the panel.
-    setPanelOpen(false, Boolean(ui.shadow.activeElement));
+  function schedulePanelClose() {
+    clearTimeout(closeTimer);
+    closeTimer = setTimeout(() => {
+      closeTimer = 0;
+      if (!pointerInside && !keyboardFocus) setPanelOpen(false);
+    }, 140);
+  }
+
+  function syncPreviewPosition() {
+    if (!ui || panelOpen || !previewActiveEntry?.marker) return;
+    const rail = ui.launcher;
+    if (!rail.clientHeight) return;
+    const marker = previewActiveEntry.marker.getBoundingClientRect();
+    const viewport = rail.getBoundingClientRect();
+    if (marker.top < viewport.top || marker.bottom > viewport.bottom) {
+      rail.scrollTop += marker.top - viewport.top + marker.height / 2 - rail.clientHeight / 2;
+    }
   }
 
   function syncTheme() {
@@ -135,16 +173,14 @@
     const style = element('style');
     style.textContent = STYLES;
 
-    const panel = element('aside', { class: 'panel', 'aria-label': '文章目录' });
+    const panel = element('aside', { class: 'panel', id: 'lc-toc-panel', 'aria-label': '文章目录' });
     const header = element('div', { class: 'header' });
     const brand = element('div', { class: 'brand' });
     const mark = element('span', { class: 'mark' });
     mark.append(icon('list'));
     const heading = element('strong', {}, '文章目录');
     brand.append(mark, heading);
-    const close = button('收起目录', 'icon-button');
-    close.append(icon('close'));
-    header.append(brand, close);
+    header.append(brand);
 
     const articleTitle = element('div', { class: 'article-title' });
     const searchBox = element('div', { class: 'search-box' });
@@ -163,23 +199,48 @@
     empty.hidden = true;
     navigation.append(list, empty);
     const footer = element('div', { class: 'footer' });
-    const escape = button('Esc 收起目录', 'escape-button');
-    escape.setAttribute('aria-keyshortcuts', 'Escape');
-    escape.append(element('kbd', {}, 'Esc'), element('span', {}, '收起'));
     footer.append(element('span', { class: 'footer-dot' }),
-      element('span', {}, '点击章节跳转'), escape);
+      element('span', {}, '点击章节跳转'));
     panel.append(header, articleTitle, tools, navigation, footer);
     const launcher = button('展开文章目录', 'launcher', '');
     launcher.setAttribute('aria-expanded', 'false');
-    launcher.append(icon('list'), element('span', {}, '目录'));
-    shadow.append(style, panel, launcher);
+    launcher.setAttribute('aria-controls', 'lc-toc-panel');
+    launcher.title = '悬停展开文章目录';
+    const panelViewport = element('div', { class: 'panel-viewport' });
+    panelViewport.append(panel);
+    shadow.append(style, panelViewport, launcher);
     document.body.append(host);
     ui = { shadow, panel, launcher, articleTitle, search, foldAll, list, empty, navigation };
 
     // These listeners are owned by the shadow tree, and disappear with the host.
-    close.addEventListener('click', () => setPanelOpen(false, true));
-    escape.addEventListener('click', () => setPanelOpen(false, true));
-    launcher.addEventListener('click', () => setPanelOpen(true, true));
+    launcher.addEventListener('click', () => {
+      keyboardFocus = !pointerInside;
+      setPanelOpen(true, true);
+    });
+    host.addEventListener('mouseenter', () => {
+      pointerInside = true;
+      keyboardFocus = false;
+      setPanelOpen(true);
+    });
+    host.addEventListener('mouseleave', () => {
+      pointerInside = false;
+      schedulePanelClose();
+    });
+    host.addEventListener('focusin', event => {
+      if (movingFocus) return;
+      keyboardFocus = !pointerInside;
+      setPanelOpen(true, event.composedPath()[0] === launcher);
+    });
+    host.addEventListener('focusout', () => {
+      // Focus may move between controls in the shadow tree. Check after the
+      // browser has updated activeElement before treating it as an exit.
+      const current = ui;
+      queueMicrotask(() => {
+        if (!current || ui !== current || current.shadow.activeElement) return;
+        keyboardFocus = false;
+        if (!pointerInside) schedulePanelClose();
+      });
+    });
     search.addEventListener('input', () => {
       if (!search.value.trim()) followPaused = false;
       filterEntries();
@@ -284,20 +345,28 @@
     entries = headings.map((item, index) => {
       while (stack.length && stack.at(-1).level >= item.level) stack.pop();
       const entry = { ...item, index, parent: stack.at(-1) || null, depth: stack.length, children: [] };
+      entry.chapter = entry.parent?.chapter || entry;
       entry.parent?.children.push(entry);
       stack.push(entry);
       return entry;
     });
     activeEntry = null;
     visibleActiveEntry = null;
+    previewActiveEntry = null;
     if (!ui) mount();
     const title = document.querySelector('#main-content h1, main h1')?.textContent.trim()
       || document.title.replace(/ - 讨论.*$/, '');
     ui.articleTitle.textContent = title;
     ui.articleTitle.title = title;
     ui.list.replaceChildren();
+    ui.launcher.replaceChildren();
     const fragment = document.createDocumentFragment();
+    const markers = document.createDocumentFragment();
     for (const entry of entries) {
+      if (!entry.parent) {
+        entry.marker = element('span', { class: 'preview-marker', 'aria-hidden': 'true' });
+        markers.append(entry.marker);
+      }
       const row = element('li', { class: `row${entry.depth === 0 ? ' chapter' : ''}` });
       row.style.setProperty('--depth', String(entry.depth));
       if (entry.children.length) {
@@ -321,6 +390,7 @@
       fragment.append(row);
     }
     ui.list.append(fragment);
+    ui.launcher.append(markers);
     updateInsets();
     filterEntries();
     requestActiveUpdate();
@@ -392,6 +462,13 @@
 
   function syncCurrentEntry() {
     if (!ui) return;
+    const preview = activeEntry?.chapter || null;
+    if (previewActiveEntry !== preview) {
+      previewActiveEntry?.marker.removeAttribute('data-current');
+      previewActiveEntry = preview;
+      preview?.marker.setAttribute('data-current', '');
+    }
+    syncPreviewPosition();
     // The actual reading position is independent of the user's fold state.
     // A hidden subsection is represented by its nearest visible ancestor.
     const visibleAncestor = entry => {
@@ -404,7 +481,7 @@
       visibleActiveEntry = visible;
       visible?.link.setAttribute('aria-current', 'location');
     }
-    if (followPaused || !panelOpen || !visible || ui.search.value.trim()) { stopFollowing(); return; }
+    if (followPaused || !visible || ui.search.value.trim()) { stopFollowing(); return; }
 
     const navigation = ui.navigation;
     const height = navigation.clientHeight;
@@ -445,7 +522,9 @@
 
   function followTo(target) {
     const navigation = ui.navigation;
-    if (reducedMotion?.matches) {
+    // Hidden outlines stay exactly aligned without running an unseen animation.
+    // Visible outlines keep the existing smooth reading-progress follow behavior.
+    if (!panelOpen || reducedMotion?.matches) {
       stopFollowing();
       navigation.scrollTop = target;
       return;
@@ -463,7 +542,7 @@
 
   function animateFollowing(time) {
     followFrame = 0;
-    if (destroyed || !ui || followPaused || !panelOpen || ui.search.value.trim() || followTarget === null) {
+    if (destroyed || !ui || followPaused || ui.search.value.trim() || followTarget === null) {
       stopFollowing();
       return;
     }
@@ -495,31 +574,40 @@
     if (frame || !entries.length || destroyed) return;
     frame = requestAnimationFrame(() => {
       frame = 0;
-      updateInsets();
-      let current = entries[0];
-      // Read live positions, so images and math rendering cannot invalidate cached offsets.
-      for (const entry of entries) {
-        if (entry.element.getBoundingClientRect().top <= topInset + 4) current = entry;
-      }
-      // Near the end of a short article, the last heading cannot reach the top.
-      // Use the actual scroll container, including nested article panes.
-      let scroller = article?.parentElement;
-      while (scroller) {
-        if (/(auto|scroll|overlay)/.test(getComputedStyle(scroller).overflowY)
-          && scroller.scrollHeight > scroller.clientHeight + 1) break;
-        scroller = scroller.parentElement;
-      }
-      const documentScroller = document.scrollingElement || document.documentElement;
-      scroller ||= documentScroller;
-      const height = scroller === documentScroller ? window.innerHeight : scroller.clientHeight;
-      const viewportBottom = scroller === documentScroller ? height : scroller.getBoundingClientRect().bottom;
-      if (scroller.scrollHeight > height + 1 && scroller.scrollTop + height >= scroller.scrollHeight - 2
-        && entries.at(-1).element.getBoundingClientRect().bottom <= viewportBottom) current = entries.at(-1);
-      setActive(current);
+      updateActiveEntry();
     });
   }
 
+  function updateActiveEntry() {
+    updateInsets();
+    let current = entries[0];
+    // Read live positions, so images and math rendering cannot invalidate cached offsets.
+    for (const entry of entries) {
+      if (entry.element.getBoundingClientRect().top <= topInset + 4) current = entry;
+    }
+    // Near the end of a short article, the last heading cannot reach the top.
+    // Use the actual scroll container, including nested article panes.
+    let scroller = article?.parentElement;
+    while (scroller) {
+      if (/(auto|scroll|overlay)/.test(getComputedStyle(scroller).overflowY)
+        && scroller.scrollHeight > scroller.clientHeight + 1) break;
+      scroller = scroller.parentElement;
+    }
+    const documentScroller = document.scrollingElement || document.documentElement;
+    scroller ||= documentScroller;
+    const height = scroller === documentScroller ? window.innerHeight : scroller.clientHeight;
+    const viewportBottom = scroller === documentScroller ? height : scroller.getBoundingClientRect().bottom;
+    if (scroller.scrollHeight > height + 1 && scroller.scrollTop + height >= scroller.scrollHeight - 2
+      && entries.at(-1).element.getBoundingClientRect().bottom <= viewportBottom) current = entries.at(-1);
+    setActive(current);
+  }
+
   function unmount() {
+    clearTimeout(closeTimer);
+    closeTimer = 0;
+    pointerInside = false;
+    keyboardFocus = false;
+    panelOpen = false;
     stopFollowing();
     followPaused = false;
     if (frame) cancelAnimationFrame(frame);
@@ -531,6 +619,7 @@
     entries = [];
     activeEntry = null;
     visibleActiveEntry = null;
+    previewActiveEntry = null;
     collapsed.clear();
   }
 
@@ -540,7 +629,7 @@
     path = location.pathname;
     if (changedPath) {
       unmount();
-      panelOpen = true;
+      panelOpen = false;
       article = null;
     }
     if (!/^\/discuss\/post\/\d+(?:\/|$)/.test(path)) {
@@ -608,25 +697,31 @@
   }
 
   const STYLES = `
-    :host { all: initial; --bg:#fff; --ink:#253044; --muted:#7d8796; --line:#e9edf2;
-      --soft:#f6f8fa; --accent:#bc6400; --active:#fff3e4; --hover:#f0f3f6;
+    :host { all: initial; --panel-width:min(288px,calc(100vw - 32px));
+      --bg:#f8fafb; --ink:#34383f; --muted:#858b94; --line:#e9edf2;
+      --soft:#f1f4f6; --accent:#ec850d; --hover:#eef1f4; --marker:#e7e8ea;
       font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
       color:var(--ink); text-align:left; }
     :host([data-theme="dark"]) { --bg:#25272b; --ink:#e1e5ec; --muted:#9ca5b3;
-      --line:#3a3e45; --soft:#2d3036; --accent:#ffbd73; --active:#453321; --hover:#343840; }
+      --line:#3a3e45; --soft:#2d3036; --accent:#ffbd73; --hover:#343840; --marker:#50545c; }
     *,*::before,*::after { box-sizing:border-box; }
     [hidden] { display:none !important; }
     button,input { font:inherit; color:inherit; }
     button { cursor:pointer; border:0; }
     button:focus-visible,input:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
     svg { width:18px; height:18px; flex:none; }
-    .panel { display:flex; flex-direction:column; width:min(288px,calc(100vw - 32px));
+    .panel-viewport { position:absolute; top:0; right:0; width:var(--panel-width);
+      overflow:hidden; border-radius:8px; pointer-events:none; }
+    .panel { display:flex; flex-direction:column; width:100%;
       max-height:calc(100vh - var(--panel-top,80px) - 16px);
       max-height:calc(100dvh - var(--panel-top,80px) - 16px); background:var(--bg);
-      border:1px solid var(--line); border-radius:16px; box-shadow:0 12px 44px #17223516;
-      overflow:hidden; }
+      border:1px solid var(--line); border-radius:8px; box-shadow:0 4px 20px #1722350a;
+      overflow:hidden; transform:translateX(100%); opacity:0; visibility:hidden; pointer-events:none;
+      transition:transform .32s cubic-bezier(.22,.61,.36,1),opacity .24s ease,visibility 0s linear .32s; }
+    :host([data-open="true"]) .panel { transform:translateX(0); opacity:1; visibility:visible;
+      pointer-events:auto; transition-delay:0s; }
     .header,.article-title,.tools { flex-shrink:0; }
-    .header { display:flex; align-items:center; justify-content:space-between; padding:16px 14px 8px 16px; }
+    .header { display:flex; align-items:center; padding:16px 16px 8px; }
     .brand { display:flex; align-items:center; gap:9px; }
     .brand strong { font-size:14px; font-weight:650; letter-spacing:.3px; }
     .mark { display:flex; color:var(--accent); }
@@ -662,28 +757,30 @@
       line-height:1.55; background:transparent; border-radius:6px; font-size:12px; overflow-wrap:anywhere; }
     .chapter>.heading-link { font-weight:650; }
     .heading-link:hover { background:var(--hover); }
-    .heading-link[aria-current] { color:var(--accent); background:var(--active); }
+    .heading-link[aria-current] { color:var(--accent); }
     .empty { padding:24px 8px; text-align:center; font-size:12px; color:var(--muted); }
     .footer { display:flex; flex:none; align-items:center; gap:6px; border-top:1px solid var(--line);
       padding:10px 16px; font-size:10px; color:var(--muted); }
     .footer-dot { width:5px; height:5px; border-radius:50%; background:var(--accent); opacity:.65; }
-    .escape-button { display:flex; align-items:center; gap:5px; margin-left:auto; padding:2px 5px;
-      color:var(--muted); background:transparent; border-radius:4px; font-size:10px; }
-    .escape-button:hover { color:var(--ink); background:var(--hover); }
-    .escape-button kbd { font:inherit; }
-    .launcher { display:flex; align-items:center; gap:7px; border:1px solid var(--line); border-radius:11px;
-      background:var(--bg); color:var(--ink); padding:11px 13px; box-shadow:0 5px 24px #17223518; }
-    .launcher svg { color:var(--accent); }
-    .launcher:hover { background:var(--soft); }
-    @media (max-width:700px) { .panel { width:min(310px,calc(100vw - 32px)); } }
-    @media (prefers-reduced-motion:reduce) { .branch svg { transition:none; } }
+    .launcher { display:flex; flex-direction:column; align-items:center; gap:16px; width:40px;
+      max-height:calc(100vh - var(--panel-top,80px) - 16px);
+      max-height:calc(100dvh - var(--panel-top,80px) - 16px);
+      margin:0; padding:12px 11px; border:0; border-radius:4px; background:transparent;
+      overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; scrollbar-width:none;
+      opacity:1; visibility:visible; transition:opacity .18s ease,visibility 0s linear; }
+    :host([data-open="true"]) .launcher { opacity:0; visibility:hidden; pointer-events:none;
+      transition-delay:0s,.18s; }
+    .launcher::-webkit-scrollbar { display:none; }
+    .preview-marker { display:block; flex:0 0 8px; width:18px; border-radius:2px; background:var(--marker); }
+    .preview-marker[data-current] { background:var(--accent); }
+    @media (max-width:700px) { :host { --panel-width:min(310px,calc(100vw - 32px)); } }
+    @media (prefers-reduced-motion:reduce) { .branch svg,.panel,.launcher { transition:none; } }
   `;
 
   window[INSTANCE_KEY] = { destroy };
   pageObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
   themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['class', 'data-theme'] });
   listen(document, 'scroll', requestActiveUpdate, { capture: true, passive: true });
-  listen(window, 'keydown', handleEscape, { capture: true });
   listen(document, 'load', event => {
     if (event.target instanceof Node && article?.contains(event.target)) requestActiveUpdate();
   }, true);
