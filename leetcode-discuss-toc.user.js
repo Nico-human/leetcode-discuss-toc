@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         力扣讨论 · 文章目录
 // @namespace    local.leetcode-discuss-toc
-// @version      1.0.12
-// @description  为力扣讨论文章生成悬停展开、可搜索、可折叠、自动高亮的多级目录，点击即可跳转。
+// @version      1.0.13
+// @description  为力扣讨论文章生成悬停展开、可固定显示、可搜索、可折叠、自动高亮的多级目录，点击即可跳转。
 // @source       https://github.com/Nico-human/leetcode-discuss-toc
 // @supportURL   https://greasyfork.org/zh-CN/scripts/601597-%E5%8A%9B%E6%89%A3%E8%AE%A8%E8%AE%BA-%E6%96%87%E7%AB%A0%E7%9B%AE%E5%BD%95/feedback
 // @supportURL   https://github.com/Nico-human/leetcode-discuss-toc/issues
@@ -51,6 +51,7 @@
   let destroyed = false;
   let topInset = 66;
   let panelOpen = false;
+  let panelPinned = false;
   let closeTimer = 0;
   let pointerInside = false;
   let keyboardFocus = false;
@@ -88,6 +89,7 @@
       chevron: 'm9 5 7 7-7 7',
       expand: 'm8 9 4-4 4 4M8 15l4 4 4-4',
       collapse: 'm8 5 4 4 4-4M8 19l4-4 4 4',
+      pin: 'M16 9V4l1-1V2H7v1l1 1v5l-3 3v2h14v-2l-3-3M12 14v8',
     };
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     svg.setAttribute('data-icon', name);
@@ -103,6 +105,7 @@
   }
 
   function setPanelOpen(open, focus = false) {
+    open ||= panelPinned;
     clearTimeout(closeTimer);
     closeTimer = 0;
     const changed = panelOpen !== open;
@@ -140,6 +143,8 @@
 
   function schedulePanelClose() {
     clearTimeout(closeTimer);
+    closeTimer = 0;
+    if (panelPinned) return;
     closeTimer = setTimeout(() => {
       closeTimer = 0;
       if (!pointerInside && !keyboardFocus) setPanelOpen(false);
@@ -185,7 +190,10 @@
     mark.append(icon('list'));
     const heading = element('strong', {}, '文章目录');
     brand.append(mark, heading);
-    header.append(brand);
+    const pin = button('固定目录预览', 'icon-button pin-toggle');
+    pin.setAttribute('aria-pressed', 'false');
+    pin.append(icon('pin'));
+    header.append(brand, pin);
 
     const articleTitle = element('div', { class: 'article-title' });
     const searchBox = element('div', { class: 'search-box' });
@@ -218,6 +226,13 @@
     ui = { shadow, panel, launcher, articleTitle, search, foldAll, list, empty, navigation };
 
     // These listeners are owned by the shadow tree, and disappear with the host.
+    pin.addEventListener('click', () => {
+      panelPinned = !panelPinned;
+      pin.setAttribute('aria-pressed', String(panelPinned));
+      pin.title = panelPinned ? '取消固定目录预览' : '固定目录预览';
+      setPanelOpen(true);
+      if (!panelPinned && !pointerInside && !keyboardFocus) schedulePanelClose();
+    });
     launcher.addEventListener('click', () => {
       keyboardFocus = !pointerInside;
       setPanelOpen(true, true);
@@ -613,6 +628,7 @@
     pointerInside = false;
     keyboardFocus = false;
     panelOpen = false;
+    panelPinned = false;
     stopFollowing();
     followPaused = false;
     if (frame) cancelAnimationFrame(frame);
@@ -726,7 +742,7 @@
     :host([data-open="true"]) .panel { transform:translateX(0); opacity:1; visibility:visible;
       pointer-events:auto; transition-delay:0s; }
     .header,.article-title,.tools { flex-shrink:0; }
-    .header { display:flex; align-items:center; padding:16px 16px 8px; }
+    .header { display:flex; align-items:center; gap:12px; padding:16px 16px 8px; }
     .brand { display:flex; align-items:center; gap:9px; }
     .brand strong { font-size:14px; font-weight:650; letter-spacing:.3px; }
     .mark { display:flex; color:var(--accent); }
@@ -735,6 +751,10 @@
     .icon-button { display:grid; place-items:center; width:26px; height:26px; padding:4px;
       border-radius:6px; color:var(--muted); background:transparent; }
     .icon-button:hover { color:var(--ink); background:var(--hover); }
+    .pin-toggle { flex:none; margin-left:auto; }
+    .pin-toggle svg { transform:rotate(35deg); }
+    .pin-toggle[aria-pressed="true"] { color:var(--accent); background:var(--soft); }
+    .pin-toggle[aria-pressed="true"] svg { transform:rotate(0); }
     .icon-button.small { width:24px; height:24px; }
     .icon-button.small svg { width:15px; height:15px; }
     .search-box { display:flex; flex:1; min-width:0; align-items:center; gap:7px; padding:7px 9px;

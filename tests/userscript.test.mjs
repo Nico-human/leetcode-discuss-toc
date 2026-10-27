@@ -327,12 +327,162 @@ test('键盘聚焦方块可打开搜索，控件间切换保持展开，离开�
   assert.equal(p.w.document.activeElement, outside);
 });
 
-test('目录不再显示关闭叉、Esc 提示或 Esc 快捷键入口', t => {
+test('目录标题栏仅显示未固定的图钉，不显示关闭叉、Esc 提示或快捷键入口', t => {
   const p = page(t);
-  assert.equal(p.shadow().querySelector('.header button'), null);
+  const pin = p.shadow().querySelector('.header button');
+  assert.equal(p.shadow().querySelectorAll('.header button').length, 1);
+  assert.ok(pin.classList.contains('pin-toggle'));
+  assert.equal(pin.getAttribute('aria-label'), '固定目录预览');
+  assert.equal(pin.getAttribute('aria-pressed'), 'false');
+  assert.equal(pin.querySelector('svg').dataset.icon, 'pin');
   assert.equal(p.shadow().querySelector('.escape-button,[aria-keyshortcuts="Escape"],[data-icon="close"]'), null);
   assert.doesNotMatch(p.shadow().querySelector('.panel').textContent, /\bEsc\b/);
   assert.equal(p.shadow().querySelector('.footer').textContent, '点击章节跳转');
+});
+
+test('固定预览后鼠标移出、焦点离开、跳转及正文滚动均保持展开', async t => {
+  const p = page(t, { openPanel: false, body: longArticle(), controlledFrames: true });
+  hover(p, true);
+  const pin = p.shadow().querySelector('.pin-toggle');
+  pin.focus();
+  pin.click();
+  assert.equal(pin.getAttribute('aria-pressed'), 'true');
+  assert.equal(pin.title, '取消固定目录预览');
+  hover(p, false);
+  const outside = p.w.document.querySelector('h1');
+  outside.tabIndex = 0;
+  outside.focus();
+  await wait();
+  assert.equal(p.shadow().querySelector('.panel').inert, false);
+  assert.equal(p.w.document.activeElement, outside);
+  p.links().find(link => link.textContent === '第8章').click();
+  await p.scroll(7234);
+  assert.equal(p.shadow().querySelector('.panel').inert, false);
+  assert.equal(p.shadow().querySelector('.panel').getAttribute('aria-hidden'), 'false');
+  assert.equal(p.shadow().querySelector('[aria-current]').textContent, '§8.1.1 细节');
+  assert.equal(p.shadow().querySelector('.launcher').inert, true);
+  assert.equal(p.jumps.length, 1);
+});
+
+test('再次点击图钉恢复悬停逻辑，鼠标仍在目录内时不立即收起', async t => {
+  const p = page(t, { openPanel: false });
+  hover(p, true);
+  const pin = p.shadow().querySelector('.pin-toggle');
+  pin.focus();
+  pin.click();
+  hover(p, false);
+  await wait();
+  hover(p, true);
+  pin.click();
+  assert.equal(pin.getAttribute('aria-pressed'), 'false');
+  assert.equal(pin.title, '固定目录预览');
+  await wait();
+  assert.equal(p.shadow().querySelector('.panel').inert, false);
+  hover(p, false);
+  await wait();
+  assert.equal(p.shadow().querySelector('.panel').inert, true);
+  hover(p, true);
+  assert.equal(p.shadow().querySelector('.panel').inert, false);
+  hover(p, false);
+  await wait();
+  assert.equal(p.shadow().querySelector('.panel').inert, true);
+});
+
+test('固定时取消待执行的收起，目录外解除固定后恢复延迟收起', async t => {
+  const p = page(t, { openPanel: false });
+  hover(p, true);
+  hover(p, false);
+  await wait(60);
+  const pin = p.shadow().querySelector('.pin-toggle');
+  pin.click();
+  await wait();
+  assert.equal(p.shadow().querySelector('.panel').inert, false);
+  pin.click();
+  assert.equal(p.shadow().querySelector('.panel').inert, false);
+  await wait();
+  assert.equal(p.shadow().querySelector('.panel').inert, true);
+});
+
+test('键盘固定后焦点移到正文保持展开，取消固定后恢复焦点离开收起', async t => {
+  const p = page(t, { openPanel: false });
+  p.shadow().querySelector('.launcher').focus();
+  const pin = p.shadow().querySelector('.pin-toggle');
+  pin.focus();
+  pin.click();
+  const outside = p.w.document.querySelector('h1');
+  outside.tabIndex = 0;
+  outside.focus();
+  await wait();
+  assert.equal(p.shadow().querySelector('.panel').inert, false);
+  pin.focus();
+  pin.click();
+  await wait();
+  assert.equal(p.shadow().querySelector('.panel').inert, false);
+  assert.equal(p.shadow().activeElement, pin);
+  outside.focus();
+  await wait();
+  assert.equal(p.shadow().querySelector('.panel').inert, true);
+});
+
+test('切换固定保留搜索词、折叠及手动目录位置，不恢复已暂停的跟随', async t => {
+  const p = page(t, { body: longArticle(), controlledFrames: true });
+  const navigation = outlineViewport(p);
+  hover(p, true);
+  await p.scroll(7234);
+  navigation.scrollTop = 0;
+  p.shadow().querySelector('.branch').click();
+  const input = p.shadow().querySelector('input');
+  const pin = p.shadow().querySelector('.pin-toggle');
+  const states = branchStates(p);
+  for (const pinned of [true, false]) {
+    pin.click();
+    p.advance();
+    assert.equal(pin.getAttribute('aria-pressed'), String(pinned));
+    assert.equal(navigation.scrollTop, 0);
+    assert.deepEqual(branchStates(p), states);
+    assert.equal(p.articleScrollY, 7234);
+  }
+  input.value = '第1章';
+  input.dispatchEvent(new p.w.Event('input'));
+  for (const pinned of [true, false]) {
+    pin.click();
+    assert.equal(pin.getAttribute('aria-pressed'), String(pinned));
+    assert.equal(input.value, '第1章');
+    assert.deepEqual(p.visible(), ['第1章']);
+  }
+});
+
+test('固定预览在异步更新标题后仍保持展开及固定状态', async t => {
+  const p = page(t, { openPanel: false });
+  hover(p, true);
+  const pin = p.shadow().querySelector('.pin-toggle');
+  pin.click();
+  hover(p, false);
+  const body = p.w.document.querySelector('.Body_markdown__test');
+  body.insertAdjacentHTML('beforeend', '<h2>追加章节</h2>');
+  await wait();
+  assert.equal(p.shadow().querySelector('.pin-toggle'), pin);
+  assert.equal(pin.getAttribute('aria-pressed'), 'true');
+  assert.equal(p.shadow().querySelector('.panel').inert, false);
+  assert.equal(p.links().at(-1).textContent, '追加章节');
+});
+
+test('站内切换文章和重新注入时清理固定状态，恢复默认方块预览', async t => {
+  const p = page(t, { openPanel: false });
+  hover(p, true);
+  p.shadow().querySelector('.pin-toggle').click();
+  hover(p, false);
+  await p.navigate('/discuss/post/1002/next/', article('<h2>新章节</h2>'));
+  assert.equal(p.shadow().querySelector('.pin-toggle').getAttribute('aria-pressed'), 'false');
+  assert.equal(p.shadow().querySelector('.panel').inert, true);
+  hover(p, true);
+  p.shadow().querySelector('.pin-toggle').click();
+  hover(p, false);
+  p.run();
+  await wait();
+  assert.equal(p.w.document.querySelectorAll('#lc-discuss-toc').length, 1);
+  assert.equal(p.shadow().querySelector('.pin-toggle').getAttribute('aria-pressed'), 'false');
+  assert.equal(p.shadow().querySelector('.panel').inert, true);
 });
 
 test('收起时方块标记当前小节所属一级目录，不受目录折叠和搜索过滤影响', async t => {
