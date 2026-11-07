@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         力扣讨论 · 文章目录
 // @namespace    local.leetcode-discuss-toc
-// @version      1.0.13
+// @version      1.0.14
 // @description  为力扣讨论文章生成悬停展开、可固定显示、可搜索、可折叠、自动高亮的多级目录，点击即可跳转。
 // @source       https://github.com/Nico-human/leetcode-discuss-toc
 // @supportURL   https://greasyfork.org/zh-CN/scripts/601597-%E5%8A%9B%E6%89%A3%E8%AE%A8%E8%AE%BA-%E6%96%87%E7%AB%A0%E7%9B%AE%E5%BD%95/feedback
@@ -23,6 +23,9 @@
   const HEADING_SELECTOR = 'h1,h2,h3,h4,h5,h6';
   const ARTICLE_SELECTORS = [
     '#main-content [class*="Body_markdown__"]',
+    // New CSS modules put the hash before _markdown. Comments share that
+    // suffix, so restrict this match to the article body wrapper.
+    '#main-content .break-words > div > [class*="_markdown"]',
     'main article [class*="markdown-content_markdown"]',
     'main [class*="markdown-content_markdown"]',
     'article .markdown-body',
@@ -288,8 +291,18 @@
 
   function findArticle() {
     for (const selector of ARTICLE_SELECTORS) {
-      const candidate = document.querySelector(selector);
-      if (candidate && !candidate.closest('[hidden], [aria-hidden="true"]')) return candidate;
+      for (const candidate of document.querySelectorAll(selector)) {
+        if (candidate.closest('[hidden], [aria-hidden="true"]')) continue;
+        let visible = true;
+        for (let node = candidate; node; node = node.parentElement) {
+          const style = getComputedStyle(node);
+          if (style.display === 'none' || style.visibility === 'hidden') {
+            visible = false;
+            break;
+          }
+        }
+        if (visible) return candidate;
+      }
     }
     return null;
   }

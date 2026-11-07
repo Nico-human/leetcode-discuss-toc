@@ -7,6 +7,11 @@ const source = await readFile(new URL('../leetcode-discuss-toc.user.js', import.
 const wait = (ms = 180) => new Promise(resolve => setTimeout(resolve, ms));
 const article = (content, extra = '') => `<main id="main-content"><h1>测试文章</h1>
   <div class="markdown-content_markdown__test Body_markdown__test">${content}</div>${extra}</main>`;
+// Structure observed on leetcode.cn after the November 2026 update. Comments
+// share the base markdown class, but live outside the article's break-words wrapper.
+const currentArticle = (content, extra = '', classes = '_2Rk6ya_markdown AXecMq_markdown') =>
+  `<main id="main-content"><h1>新版测试文章</h1>
+    <div class="break-words"><div><div class="${classes}">${content}</div></div></div>${extra}</main>`;
 
 function page(t, { body = article('<h2>第一章</h2><h3>基础</h3><h4>例题</h4><h2>第二章</h2>'),
   width = 1440, height = 768, reduced = false, url = 'https://leetcode.cn/discuss/post/1001/test/',
@@ -978,6 +983,75 @@ test('备用正文选择器生效，空标题与隐藏标题不进入目录', t 
     + '<h2> </h2><h2 hidden>隐藏</h2><h3>可见</h3></div>'
     + '<div class="markdown-content_markdown__new"><h2>评论</h2></div></main>' });
   assert.deepEqual(p.visible(), ['正文一级', '可见']);
+});
+
+test('新版正文提取所有标题层级，排除文章大标题及共享 markdown 类名的评论', t => {
+  const p = page(t, { body: currentArticle('<h2>前言</h2><h3>基础</h3><h4>例题</h4>'
+    + '<h5>细节</h5><h6>补充</h6>',
+  '<section><div class="_2Rk6ya_markdown"><h2>评论标题</h2></div></section>') });
+  assert.deepEqual(p.visible(), ['前言', '基础', '例题', '细节', '补充']);
+  assert.equal(p.shadow().querySelector('.article-title').textContent, '新版测试文章');
+  p.links()[2].click();
+  assert.equal(p.jumps[0].target.textContent, '例题');
+});
+
+test('新版正文类名哈希、顺序及附加类变化不影响识别', t => {
+  const p = page(t, { body: currentArticle('<h2>章节</h2>', '',
+    'theme customBody_markdown extra anotherHash_markdown') });
+  assert.deepEqual(p.visible(), ['章节']);
+});
+
+test('正文异步加载前不使用带标题的新版评论生成目录', async t => {
+  const comments = '<section><div class="_2Rk6ya_markdown"><h2>评论标题</h2></div></section>';
+  const p = page(t, { body: `<main id="main-content"><p>加载中</p>${comments}</main>` });
+  assert.equal(p.shadow(), undefined);
+  p.w.document.querySelector('main').innerHTML = currentArticle('<h2>异步章节</h2>', comments)
+    .replace(/^<main[^>]*>|<\/main>$/g, '');
+  await wait();
+  assert.deepEqual(p.visible(), ['异步章节']);
+});
+
+test('新版正文没有标题时不收录评论，追加标题后自动生成目录', async t => {
+  const p = page(t, { body: currentArticle('<p>暂无章节</p>',
+    '<section><div class="_2Rk6ya_markdown"><h2>评论标题</h2></div></section>') });
+  assert.equal(p.shadow(), undefined);
+  p.w.document.querySelector('.break-words [class*="_markdown"]')
+    .insertAdjacentHTML('beforeend', '<h2>新增章节</h2>');
+  await wait();
+  assert.deepEqual(p.visible(), ['新增章节']);
+});
+
+test('新版正文评论更新不重建目录，标题改名和增删仍自动同步', async t => {
+  const p = page(t, { body: currentArticle('<h2>章节</h2><h3>小节</h3>',
+    '<section class="comments"><div class="_2Rk6ya_markdown">评论</div></section>') });
+  assert.deepEqual(p.visible(), ['章节', '小节']);
+  const link = p.links()[0];
+  p.shadow().querySelector('input').value = '章节';
+  p.w.document.querySelector('.comments div').innerHTML = '<h2>新增评论标题</h2>';
+  await wait();
+  assert.equal(p.links()[0], link);
+  assert.equal(p.shadow().querySelector('input').value, '章节');
+  const body = p.w.document.querySelector('.break-words [class*="_markdown"]');
+  body.querySelector('h2').firstChild.data = '章节改名';
+  body.querySelector('h3').remove();
+  body.insertAdjacentHTML('beforeend', '<h3>章节新增</h3>');
+  await wait();
+  assert.deepEqual(p.visible(), ['章节改名', '章节新增']);
+});
+
+test('站内切换新版与旧版文章均更新目录', async t => {
+  const p = page(t);
+  await p.navigate('/discuss/post/1002/new/', currentArticle('<h2>新版章节</h2>'));
+  assert.deepEqual(p.visible(), ['新版章节']);
+  await p.navigate('/discuss/post/1003/old/', article('<h2>旧版章节</h2>'));
+  assert.deepEqual(p.visible(), ['旧版章节']);
+});
+
+test('新版正文跳过隐藏的旧副本并选择可见正文', t => {
+  const hidden = '<div class="break-words"><div><div class="hiddenHash_markdown"><h2>旧副本</h2></div></div></div>';
+  const body = currentArticle('<h2>当前章节</h2>');
+  const p = page(t, { body: body.replace('<h1>', `<div style="display:none">${hidden}</div><h1>`) });
+  assert.deepEqual(p.visible(), ['当前章节']);
 });
 
 test('标题内容作为文本展示，标题没有 ID 时也可以跳转', t => {
